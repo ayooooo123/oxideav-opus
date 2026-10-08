@@ -411,25 +411,64 @@ fn ensure(out: &mut [Vec<f32>; 2], len: usize) {
     }
 }
 
+/// Where an output channel's samples come from, as `opus_decode_packet`
+/// points the streams' outputs at the frame's planes.
+#[derive(Clone, Copy, Debug)]
+enum Source {
+    /// Plane `.1` of stream `.0`'s output.
+    Stream(usize, usize),
+    /// Zeros: a silent channel, or one whose stream channel a later map
+    /// (a silent one names stream 0, channel 0) took over.
+    Silence,
+}
+
 /// `OpusContext`: the multistream decoder.
 pub(crate) struct OpusContext {
     streams: Vec<Stream>,
+    /// Each stream's two output planes, reused from packet to packet.
+    outs: Vec<[Vec<f32>; 2]>,
+    /// Per output channel: its source and how many times FFmpeg's loop
+    /// multiplies it by the gain (twice for a copy: it copies a channel the
+    /// loop has already scaled, then scales it).
+    sources: Vec<(Source, u8)>,
     gain: f32,
     gain_i: i16,
-    pub(crate) p: ParseContext,
-}
-
-/// One decoded frame: planar float, one plane per output channel.
-pub(crate) struct DecodedFrame {
-    pub(crate) planes: Vec<Vec<f32>>,
-    pub(crate) samples: usize,
 }
 
 impl OpusContext {
     /// `opus_decode_init`.
     pub(crate) fn new(p: ParseContext) -> Self {
-        let streams = (0..p.nb_streams)
+        let streams: Vec<Stream> = (0..p.nb_streams)
             .map(|i| Stream::new(if i < p.nb_stereo_streams { 2 } else { 1 }, true))
+            .collect();
+        let outs = (0..p.nb_streams)
+            .map(|_| [Vec::new(), Vec::new()])
+            .collect();
+        // The last map naming a stream channel gets its output.
+        let mut targets = vec![[None::<usize>; 2]; p.nb_streams];
+        for (i, map) in p.channel_maps.iter().enumerate() {
+            if map.copy.is_none() {
+                if let Some(t) = targets.get_mut(map.stream_idx) {
+                    t[map.channel_idx.min(1)] = Some(i);
+                }
+            }
+        }
+        let direct = |i: usize| {
+            let map = p.channel_maps[i];
+            let c = map.channel_idx.min(1);
+            match targets.get(map.stream_idx) {
+                Some(t) if !map.silence && t[c] == Some(i) => Source::Stream(map.stream_idx, c),
+                _ => Source::Silence,
+            }
+        };
+        let sources = p
+            .channel_maps
+            .iter()
+            .enumerate()
+            .map(|(i, map)| match map.copy {
+                Some(j) => (direct(j), 2),
+                None => (direct(i), 1),
+            })
             .collect();
         let gain = if p.gain_i != 0 {
             2f64.powf(std::f64::consts::LOG2_10 * (f64::from(p.gain_i) / (20.0 * 256.0))) as f32
@@ -438,14 +477,11 @@ impl OpusContext {
         };
         Self {
             streams,
+            outs,
+            sources,
             gain,
             gain_i: p.gain_i,
-            p,
         }
-    }
-
-    pub(crate) fn channels(&self) -> usize {
-        self.p.channel_maps.len()
     }
 
     /// `opus_decode_flush`.
@@ -465,11 +501,12 @@ impl OpusContext {
         }
     }
 
-    /// `opus_decode_packet`: `None` drains. Returns the frame, if any.
+    /// `opus_decode_packet`: `None` drains. Returns the sample count of the
+    /// decoded frame, if any; [`Self::write_channel`] reads it.
     pub(crate) fn decode_packet(
         &mut self,
         buf: Option<&[u8]>,
-    ) -> Result<Option<DecodedFrame>, DecodeError> {
+    ) -> Result<Option<usize>, DecodeError> {
         let nb_streams = self.streams.len();
         let mut coded_samples = 0usize;
         let mut delayed_samples = 0usize;
@@ -487,32 +524,21 @@ impl OpusContext {
         if nb_samples == 0 {
             return Ok(None);
         }
-        let channels = self.channels();
 
-        // Which output channel each stream channel writes (the last map
-        // naming it, as FFmpeg assigns them in order; silent maps name
-        // stream 0, channel 0, as FFmpeg's zeroed maps do).
-        let mut targets = vec![[None::<usize>; 2]; nb_streams];
-        for (i, map) in self.p.channel_maps.iter().enumerate() {
-            if map.copy.is_none() {
-                if let Some(t) = targets.get_mut(map.stream_idx) {
-                    t[map.channel_idx.min(1)] = Some(i);
-                }
-            }
-        }
-
-        let mut outs: Vec<[Vec<f32>; 2]> = Vec::with_capacity(nb_streams);
-        let mut sync_sizes = Vec::with_capacity(nb_streams);
-        for s in &mut self.streams {
-            let mut o = [vec![0f32; nb_samples + 240], vec![0f32; nb_samples + 240]];
-            let sync = s.sync_buffer[0].len();
+        let (streams, outs) = (&mut self.streams, &mut self.outs);
+        // The frame's planes start with each stream's synchronisation
+        // samples; the stream decodes after them (`starts`; at most 255
+        // streams).
+        let mut starts = [0usize; 255];
+        for (i, (s, o)) in streams.iter_mut().zip(outs.iter_mut()).enumerate() {
+            ensure(o, nb_samples + 240);
+            starts[i] = s.sync_buffer[0].len();
             for c in 0..2 {
-                for k in 0..sync {
-                    o[c][k] = s.sync_buffer[c].pop_front().unwrap_or(0.0);
+                o[c][..nb_samples + 240].fill(0.0);
+                for (k, v) in s.sync_buffer[c].drain(..).enumerate() {
+                    o[c][k] = v;
                 }
             }
-            outs.push(o);
-            sync_sizes.push(sync);
         }
 
         let mut decoded_samples = usize::MAX;
@@ -521,7 +547,7 @@ impl OpusContext {
             if i != 0 {
                 if let Some(data) = buf {
                     let rest = data.get(offset..).unwrap_or(&[]);
-                    let s = &mut self.streams[i];
+                    let s = &mut streams[i];
                     parse_packet(&mut s.packet, rest, i != nb_streams - 1)
                         .map_err(|_| DecodeError("error parsing the packet header"))?;
                     if coded_samples != s.packet.frame_count * s.packet.frame_duration {
@@ -531,8 +557,8 @@ impl OpusContext {
                 }
             }
             let sub = buf.map(|data| data.get(offset..).unwrap_or(&[]));
-            let s = &mut self.streams[i];
-            let ret = s.decode_subpacket(&mut outs[i], sync_sizes[i], sub)?;
+            let s = &mut streams[i];
+            let ret = s.decode_subpacket(&mut outs[i], starts[i], sub)?;
             s.decoded_samples = ret;
             decoded_samples = decoded_samples.min(ret);
             if buf.is_some() {
@@ -540,50 +566,46 @@ impl OpusContext {
             }
         }
 
-        for (i, s) in self.streams.iter_mut().enumerate() {
+        for (i, s) in streams.iter_mut().enumerate() {
             let extra = s.decoded_samples - decoded_samples;
             if extra != 0 {
-                let from = sync_sizes[i] + decoded_samples;
+                let from = starts[i] + decoded_samples;
                 for c in 0..2 {
                     // FFmpeg buffers an unmapped channel from output 0.
-                    for k in 0..extra {
-                        let v = outs[i][c].get(from + k).copied().unwrap_or(0.0);
-                        s.sync_buffer[c].push_back(v);
-                    }
+                    let plane = &outs[i][c];
+                    s.sync_buffer[c]
+                        .extend((0..extra).map(|k| plane.get(from + k).copied().unwrap_or(0.0)));
                 }
             }
         }
+        Ok((decoded_samples != 0).then_some(decoded_samples))
+    }
 
-        let mut planes: Vec<Vec<f32>> = vec![Vec::new(); channels];
-        for (si, t) in targets.iter().enumerate() {
-            for c in 0..2 {
-                if let Some(ch) = t[c] {
-                    planes[ch] = outs[si][c][..decoded_samples].to_vec();
+    /// Appends output channel `ch`'s samples `from..from + n` of the frame
+    /// [`Self::decode_packet`] decoded last to `out`, as little-endian f32,
+    /// with the `OpusHead` gain applied as FFmpeg applies it.
+    pub(crate) fn write_channel(&self, ch: usize, from: usize, n: usize, out: &mut Vec<u8>) {
+        let (source, times) = self.sources[ch];
+        let scale = |mut v: f32| {
+            if self.gain_i != 0 {
+                for _ in 0..times {
+                    v *= self.gain;
+                }
+            }
+            v
+        };
+        match source {
+            Source::Stream(s, c) => {
+                for &v in &self.outs[s][c][from..from + n] {
+                    out.extend_from_slice(&scale(v).to_le_bytes());
+                }
+            }
+            Source::Silence => {
+                let zero = scale(0.0).to_le_bytes();
+                for _ in 0..n {
+                    out.extend_from_slice(&zero);
                 }
             }
         }
-        for i in 0..channels {
-            let map = self.p.channel_maps[i];
-            if let Some(src) = map.copy {
-                planes[i] = planes[src].clone();
-            } else if map.silence {
-                planes[i] = vec![0.0; decoded_samples];
-            }
-            if planes[i].len() != decoded_samples {
-                planes[i].resize(decoded_samples, 0.0);
-            }
-            if self.gain_i != 0 && decoded_samples > 0 {
-                for v in &mut planes[i] {
-                    *v *= self.gain;
-                }
-            }
-        }
-        if decoded_samples == 0 {
-            return Ok(None);
-        }
-        Ok(Some(DecodedFrame {
-            planes,
-            samples: decoded_samples,
-        }))
     }
 }

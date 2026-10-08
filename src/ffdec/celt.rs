@@ -1018,11 +1018,11 @@ impl Celt {
         for i in 0..self.output_channels {
             for j in 0..self.blocks {
                 let dst = 1024 + j * self.blocksize;
-                let block = &mut self.block[i];
                 let n = self.blocksize;
-                let mut tmp = vec![0f32; n];
-                self.imdct[imdct_idx].run(&mut tmp, &block.coeffs[j..], self.blocks);
-                block.buf[dst + CELT_OVERLAP / 2..dst + CELT_OVERLAP / 2 + n].copy_from_slice(&tmp);
+                let CeltBlock { buf, coeffs, .. } = &mut self.block[i];
+                let at = dst + CELT_OVERLAP / 2;
+                self.imdct[imdct_idx].run(&mut buf[at..at + n], &coeffs[j..], self.blocks);
+                let block = &mut self.block[i];
                 vector_fmul_window(&mut block.buf[dst..dst + CELT_OVERLAP], CELT_OVERLAP / 2);
             }
             if downmix {

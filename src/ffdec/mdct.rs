@@ -126,6 +126,9 @@ pub(crate) struct Imdct {
     fft: Fft,
     pre: Vec<C64>,
     post: Vec<C64>,
+    /// FFT input and output, kept between calls.
+    v: Vec<C64>,
+    big: Vec<C64>,
 }
 
 impl Imdct {
@@ -156,27 +159,27 @@ impl Imdct {
             fft: Fft::new(m),
             pre,
             post,
+            v: vec![C64::default(); m],
+            big: vec![C64::default(); m],
         }
     }
 
     /// `dst[0..len] = imdct(src[0], src[stride], ...)`.
-    pub(crate) fn run(&self, dst: &mut [f32], src: &[f32], stride: usize) {
+    pub(crate) fn run(&mut self, dst: &mut [f32], src: &[f32], stride: usize) {
         let n = self.len;
         let m = n / 2;
         let x = |j: usize| f64::from(src[j * stride]);
-        let mut v = vec![C64::default(); m];
-        for (k, vk) in v.iter_mut().enumerate() {
+        for (k, vk) in self.v.iter_mut().enumerate() {
             let t = C64 {
                 re: x(2 * k),
                 im: x(n - 1 - 2 * k),
             };
             *vk = t.mul(self.pre[k]);
         }
-        let mut big = vec![C64::default(); m];
-        self.fft.run(&v, &mut big);
+        self.fft.run(&self.v, &mut self.big);
         // C[2p] = Re U[p], C[n-1-2p] = -Im U[p]; dst[i] = scale * C[n-1-i].
         for p in 0..m {
-            let u = big[p].mul(self.post[p]);
+            let u = self.big[p].mul(self.post[p]);
             dst[n - 1 - 2 * p] = (self.scale * u.re) as f32;
             dst[2 * p] = (self.scale * -u.im) as f32;
         }

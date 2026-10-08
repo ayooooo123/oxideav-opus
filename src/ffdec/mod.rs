@@ -100,25 +100,24 @@ impl FfOpusDecoder {
         })
     }
 
-    fn push(&mut self, frame: dec::DecodedFrame, pts: Option<i64>) {
-        let skip = self.pre_skip.min(frame.samples);
+    /// Queues the frame the context decoded last (`samples` per channel),
+    /// less what is left of the pre-skip.
+    fn push(&mut self, samples: usize, pts: Option<i64>) {
+        let skip = self.pre_skip.min(samples);
         self.pre_skip -= skip;
-        let samples = frame.samples - skip;
-        if samples == 0 {
+        let kept = samples - skip;
+        if kept == 0 {
             return;
         }
-        let data = frame
-            .planes
-            .iter()
-            .map(|plane| {
-                plane[skip..skip + samples]
-                    .iter()
-                    .flat_map(|s| s.to_le_bytes())
-                    .collect()
+        let data = (0..usize::from(self.format.channels))
+            .map(|ch| {
+                let mut plane = Vec::with_capacity(4 * kept);
+                self.ctx.write_channel(ch, skip, kept, &mut plane);
+                plane
             })
             .collect();
         self.queue.push_back(AudioFrame {
-            samples: samples as u32,
+            samples: kept as u32,
             pts,
             data,
         });
@@ -135,8 +134,8 @@ impl Decoder for FfOpusDecoder {
             return Ok(());
         }
         match self.ctx.decode_packet(Some(&packet.data)) {
-            Ok(Some(frame)) => {
-                self.push(frame, packet.pts);
+            Ok(Some(samples)) => {
+                self.push(samples, packet.pts);
                 Ok(())
             }
             Ok(None) => Ok(()),
@@ -160,7 +159,7 @@ impl Decoder for FfOpusDecoder {
             // one outputs nothing.
             for _ in 0..4 {
                 match self.ctx.decode_packet(None) {
-                    Ok(Some(frame)) => self.push(frame, None),
+                    Ok(Some(samples)) => self.push(samples, None),
                     _ => break,
                 }
             }
