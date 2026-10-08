@@ -795,6 +795,8 @@ pub mod celt_transitions;
 #[doc(hidden)] // internal — exposed for tests/fuzz; not part of the stable API
 pub mod celt_trim_offsets;
 pub mod decoder;
+// The registered decoder: FFmpeg 2da55bf's, ported (LGPL-2.1-or-later).
+mod ffdec;
 pub mod frames;
 pub mod framing;
 pub mod framing_self_delim;
@@ -1049,7 +1051,8 @@ pub use redundancy_decode_params::{
     REDUNDANT_CROSS_LAP_TENTHS_MS, REDUNDANT_FRAME_TENTHS_MS,
 };
 pub use registry::{
-    make_decoder, make_encoder, OpusEncoderOptions, OpusStreamDecoder, OpusStreamEncoder,
+    make_decoder, make_encoder, make_native_decoder, OpusEncoderOptions, OpusStreamDecoder,
+    OpusStreamEncoder,
 };
 #[doc(hidden)] // internal — exposed for tests/fuzz; not part of the stable API
 pub use signal_analysis::{SignalAnalyser, SignalClass, SignalFeatures, SignalVerdict};
@@ -1147,17 +1150,21 @@ pub use toc::{Bandwidth, ChannelMapping, FrameCountCode, Mode, OpusTocByte};
 /// The registration also wires the working decoder/encoder factories
 /// ([`registry::make_decoder`] / [`registry::make_encoder`]), so
 /// registry resolution (`CodecRegistry::first_decoder` and friends)
-/// constructs a real [`registry::OpusStreamDecoder`] /
+/// constructs FFmpeg 2da55bf's Opus decoder, ported (planar float at
+/// 48 kHz in FFmpeg's channel order, the `OpusHead` in extradata giving
+/// the channel mapping, pre-skip and gain), or a real
 /// [`registry::OpusStreamEncoder`] honouring the stream's
-/// [`oxideav_core::CodecParameters`] (extradata `OpusHead`, channel
-/// count, bit rate). The same factory functions remain directly
-/// callable without a registry — the crate's dual-API convention.
+/// [`oxideav_core::CodecParameters`] (channel count, bit rate). The
+/// crate's own RFC 6716 decoder is [`registry::make_native_decoder`]. The
+/// same factory functions remain directly callable without a registry —
+/// the crate's dual-API convention.
 pub fn register(ctx: &mut RuntimeContext) {
     let mut caps = oxideav_core::CodecCapabilities::audio("opus_sw");
     caps.lossy = true;
     caps.max_sample_rate = Some(48_000);
-    // RFC 7845 §5.1.1 channel mapping: up to 255 output channels.
-    caps.max_channels = Some(255);
+    // The decoder takes up to 64 output channels (an untrusted-input
+    // bound below RFC 7845's 255).
+    caps.max_channels = Some(64);
     ctx.codecs.register(
         oxideav_core::CodecInfo::new(oxideav_core::CodecId::new("opus"))
             .capabilities(caps.with_decode())

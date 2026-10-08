@@ -111,13 +111,11 @@ fn unrelated_payloads_do_not_resolve() {
 
 // ───────────────────── factory resolution ─────────────────────
 //
-// Round 450: the registration is no longer tag-only — the registry
-// carries working decoder/encoder factories. These tests resolve the
-// codec THROUGH a `RuntimeContext` registry (never by direct
-// construction) and run real fixture audio through the resolved
-// engines, pinning the dual-API convention: registry resolution and
-// the direct `make_decoder` / `make_encoder` calls construct the same
-// implementation.
+// The registration carries working decoder/encoder factories. The
+// registry's decoder is FFmpeg 2da55bf's, ported (`make_decoder`; its
+// output is checked against FFmpeg's in `ffdec_parity.rs`); the crate's
+// RFC 6716 decoder stays behind `make_native_decoder`, whose reference
+// conformance is pinned here.
 
 use oxideav_core::{CodecParameters, Frame, Packet, Rational, TimeBase};
 
@@ -194,19 +192,15 @@ fn core_packet(bytes: &[u8]) -> Packet {
     Packet::new(0, TimeBase(Rational::new(1, 48_000)), bytes.to_vec())
 }
 
-/// Decode one Ogg-Opus fixture through a registry-RESOLVED decoder
-/// (extradata = the stream's OpusHead packet, so the adapter owns the
-/// §5.1 pre-skip and output gain) and return `(interleaved pcm,
-/// channels)`.
-fn registry_decode_fixture(stream: &[u8]) -> (Vec<i16>, usize) {
-    let ctx = registered_context();
-    assert!(ctx.codecs.has_decoder(&CodecId::new("opus")));
-
+/// Decode one Ogg-Opus fixture through the native decoder (extradata =
+/// the stream's OpusHead packet, so the adapter owns the §5.1 pre-skip
+/// and output gain) and return `(interleaved pcm, channels)`.
+fn native_decode_fixture(stream: &[u8]) -> (Vec<i16>, usize) {
     let packets = ogg_packets(stream);
     assert!(packets.len() > 2, "fixture must have headers + audio");
     let mut params = CodecParameters::audio(CodecId::new("opus"));
     params.extradata = packets[0].clone();
-    let mut dec = ctx.codecs.first_decoder(&params).expect("resolve decoder");
+    let mut dec = oxideav_opus::make_native_decoder(&params).expect("native decoder");
 
     let mut pcm: Vec<i16> = Vec::new();
     let mut channels = 0usize;
@@ -233,33 +227,33 @@ fn registry_decode_fixture(stream: &[u8]) -> (Vec<i16>, usize) {
 }
 
 #[test]
-fn registry_resolved_decoder_reproduces_the_silk_reference_decode() {
+fn native_decoder_reproduces_the_silk_reference_decode() {
     // The NB mono SILK fixture decodes bit-exactly against its shipped
     // reference decode through the DIRECT decoder
-    // (tests/silk_reference_waveform.rs); the registry-resolved path
-    // must reproduce the same waveform, with the RFC 7845 §5.1
-    // pre-skip applied by the adapter itself.
+    // (tests/silk_reference_waveform.rs); the framework adapter must
+    // reproduce the same waveform, with the RFC 7845 §5.1 pre-skip
+    // applied by the adapter itself.
     let stream = include_bytes!("fixtures/silk-nb-mono-16kbps.opus");
     let expected = wav_pcm_payload(include_bytes!("fixtures/silk-nb-mono-16kbps.expected.wav"));
-    let (pcm, channels) = registry_decode_fixture(stream);
+    let (pcm, channels) = native_decode_fixture(stream);
     assert_eq!(channels, 1);
     let snr = snr_db(&expected, &pcm);
     assert!(
         snr >= 100.0,
-        "registry-resolved decode must sit at the reference floor, got {snr:.1} dB"
+        "native adapter decode must sit at the reference floor, got {snr:.1} dB"
     );
 }
 
 #[test]
-fn registry_resolved_decoder_handles_stereo_and_celt_streams() {
+fn native_decoder_handles_stereo_and_celt_streams() {
     // WB stereo SILK (bit-exact reference agreement) and FB stereo
     // CELT (float-noise floor ~88 dB direct) both decode through the
-    // registry-resolved adapter at their established gates.
+    // native adapter at their established gates.
     let silk = include_bytes!("fixtures/silk-wb-stereo-20kbps.opus");
     let silk_ref = wav_pcm_payload(include_bytes!(
         "fixtures/silk-wb-stereo-20kbps.expected.wav"
     ));
-    let (pcm, channels) = registry_decode_fixture(silk);
+    let (pcm, channels) = native_decode_fixture(silk);
     assert_eq!(channels, 2);
     let snr = snr_db(&silk_ref, &pcm);
     assert!(snr >= 100.0, "stereo SILK registry decode: {snr:.1} dB");
@@ -268,20 +262,20 @@ fn registry_resolved_decoder_handles_stereo_and_celt_streams() {
     let celt_ref = wav_pcm_payload(include_bytes!(
         "fixtures/celt-fb-stereo-128kbps.expected.wav"
     ));
-    let (pcm, channels) = registry_decode_fixture(celt);
+    let (pcm, channels) = native_decode_fixture(celt);
     assert_eq!(channels, 2);
     let snr = snr_db(&celt_ref, &pcm);
     assert!(snr >= 60.0, "CELT registry decode: {snr:.1} dB");
 }
 
 #[test]
-fn registry_resolved_decoder_assembles_multistream_51() {
+fn native_decoder_assembles_multistream_51() {
     // The 5.1 fixture's OpusHead (mapping family 1, 4 streams / 2
-    // coupled) routes the registry decoder through the multistream
+    // coupled) routes the native decoder through the multistream
     // assembly; the output must match the shipped reference decode.
     let stream = include_bytes!("fixtures/multistream-5.1.opus");
     let expected = wav_pcm_payload(include_bytes!("fixtures/multistream-5.1.expected.wav"));
-    let (pcm, channels) = registry_decode_fixture(stream);
+    let (pcm, channels) = native_decode_fixture(stream);
     assert_eq!(channels, 6);
     let snr = snr_db(&expected, &pcm);
     assert!(snr >= 60.0, "5.1 registry decode: {snr:.1} dB");
@@ -331,11 +325,15 @@ fn registry_resolved_encoder_roundtrips_through_resolved_decoder() {
             Err(e) => panic!("receive_packet: {e}"),
         };
         dec.send_packet(&packet).expect("decode");
+        // The registry's decoder: planar float, one plane per channel.
         while let Ok(Frame::Audio(f)) = dec.receive_frame() {
+            assert_eq!(f.data.len(), 2, "two planes");
             decoded += f.samples as usize;
-            for b in f.data[0].chunks_exact(2) {
-                let v = f64::from(i16::from_le_bytes([b[0], b[1]]));
-                energy += v * v;
+            for plane in &f.data {
+                for b in plane.chunks_exact(4) {
+                    let v = f64::from(f32::from_le_bytes([b[0], b[1], b[2], b[3]]));
+                    energy += v * v;
+                }
             }
         }
     }
@@ -345,8 +343,8 @@ fn registry_resolved_encoder_roundtrips_through_resolved_decoder() {
 }
 
 #[test]
-fn registry_resolved_decoder_honours_a_reduced_sample_rate() {
-    // `CodecParameters::sample_rate = 8000` must route the resolved
+fn native_decoder_honours_a_reduced_sample_rate() {
+    // `CodecParameters::sample_rate = 8000` must route the native
     // decoder through the reduced-rate decode surface. The NB SILK
     // fixture decodes BIT-EXACTLY against the reference listing
     // decoder's own 8 kHz decode (shipped fixture), so the adapter's
@@ -359,7 +357,6 @@ fn registry_resolved_decoder_honours_a_reduced_sample_rate() {
             .map(|c| i16::from_le_bytes([c[0], c[1]]))
             .collect::<Vec<i16>>()
     };
-    let ctx = registered_context();
     let packets = ogg_packets(stream);
     let head = &packets[0];
     let pre_skip_48k = u16::from_le_bytes([head[10], head[11]]) as usize;
@@ -369,7 +366,7 @@ fn registry_resolved_decoder_honours_a_reduced_sample_rate() {
     let mut params = CodecParameters::audio(CodecId::new("opus"));
     params.extradata = head.clone();
     params.sample_rate = Some(8_000);
-    let mut dec = ctx.codecs.first_decoder(&params).expect("resolve decoder");
+    let mut dec = oxideav_opus::make_native_decoder(&params).expect("native decoder");
     let mut pcm: Vec<i16> = Vec::new();
     for pk in &packets[2..] {
         dec.send_packet(&core_packet(pk)).expect("decode");
@@ -384,7 +381,7 @@ fn registry_resolved_decoder_honours_a_reduced_sample_rate() {
     assert_eq!(
         pcm,
         expected_full[pre_skip_8k..],
-        "bit-exact 8 kHz registry decode"
+        "bit-exact 8 kHz native decode"
     );
 }
 

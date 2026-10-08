@@ -301,12 +301,22 @@ impl oxideav_core::Decoder for OpusStreamDecoder {
     }
 }
 
-/// Registry factory: build an [`OpusStreamDecoder`] honouring the
-/// stream's [`CodecParameters`] (extradata `OpusHead`, channel count,
-/// sample rate / format). This is both the direct-call construction
-/// path and the function [`crate::register`] installs as the codec's
-/// [`oxideav_core::DecoderFactory`].
+/// The registry's decoder factory: FFmpeg 2da55bf's Opus decoder, ported
+/// (`crate::ffdec`): planar float at 48 kHz in FFmpeg's channel order,
+/// reported through `Decoder::output_audio_format`, equal to FFmpeg's
+/// output for the same packets. This is the function [`crate::register`]
+/// installs as the codec's [`oxideav_core::DecoderFactory`].
 pub fn make_decoder(
+    params: &CodecParameters,
+) -> oxideav_core::Result<Box<dyn oxideav_core::Decoder>> {
+    crate::ffdec::make_decoder(params)
+}
+
+/// This crate's own RFC 6716 decoder behind the framework API: an
+/// [`OpusStreamDecoder`] honouring the stream's [`CodecParameters`]
+/// (extradata `OpusHead`, channel count, a reduced output sample rate),
+/// interleaved S16 in `OpusHead` channel order.
+pub fn make_native_decoder(
     params: &CodecParameters,
 ) -> oxideav_core::Result<Box<dyn oxideav_core::Decoder>> {
     Ok(Box::new(OpusStreamDecoder::from_params(params)?))
@@ -820,17 +830,18 @@ mod tests {
     }
 
     #[test]
-    fn decoder_rejects_wrong_rate_and_format() {
+    fn native_decoder_rejects_wrong_rate_and_format() {
         let mut p = audio_params(1);
         p.sample_rate = Some(44_100);
-        assert!(make_decoder(&p).is_err());
+        assert!(make_native_decoder(&p).is_err());
         let mut p = audio_params(1);
         p.sample_format = Some(SampleFormat::F32);
-        assert!(make_decoder(&p).is_err());
+        assert!(make_native_decoder(&p).is_err());
     }
 
     #[test]
-    fn decoder_requires_mapping_for_many_channels() {
+    fn decoders_require_mapping_for_many_channels() {
+        assert!(make_native_decoder(&audio_params(6)).is_err());
         assert!(make_decoder(&audio_params(6)).is_err());
     }
 
@@ -845,7 +856,7 @@ mod tests {
         head.extend_from_slice(&[0, 0, 0]);
         let mut p = audio_params(1);
         p.extradata = head;
-        assert!(make_decoder(&p).is_err());
+        assert!(make_native_decoder(&p).is_err());
     }
 
     #[test]

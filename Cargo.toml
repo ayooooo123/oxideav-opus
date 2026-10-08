@@ -3,7 +3,8 @@ name = "oxideav-opus"
 version = "0.0.14"
 edition = "2021"
 rust-version = "1.80"
-license = "MIT"
+# MIT, except src/ffdec (a port of FFmpeg's decoder): LGPL-2.1-or-later.
+license = "MIT AND LGPL-2.1-or-later"
 repository = "https://github.com/OxideAV/oxideav-opus"
 authors = ["Mark Karpeles"]
 description = "Opus audio codec — orphan-rebuild scaffold pending clean-room re-implementation."
@@ -15,3 +16,10 @@ categories = ["multimedia::encoding", "multimedia::audio"]
 
 [dependencies]
 oxideav-core = "0.1"
+
+# The decoder reports its layout through Decoder::output_audio_format, which
+# the published core lacks: build against the core fork the player pins (a
+# [patch] applies only to this crate's own builds; the player's workspace
+# patches the core itself).
+[patch.crates-io]
+oxideav-core = { git = "https://github.com/ayooooo123/oxideav-core", rev = "96094a916d8b9f2695f70bb0d53e5956b8a79847" }

@@ -7,6 +7,20 @@ Pure-Rust Opus audio codec (SILK + CELT) for the
 
 ## Status
 
+**PearTube fork: the registered decoder is FFmpeg's.** `make_decoder` (and
+so `register`) returns a port of FFmpeg 2da55bf's Opus decoder
+(`src/ffdec`: `libavcodec/opus/dec.c`, `silk.c`, `dec_celt.c`, `celt.c`,
+`pvq.c`, `rc.c`, `parse.c`, `dsp.c`, `tab.c`, the libswresample resampler
+its SILK path runs through, LGPL-2.1-or-later). It outputs planar float at
+48 kHz in FFmpeg's channel order (mapping family 1 reordered from the
+`OpusHead`'s Vorbis order), reported through
+`Decoder::output_audio_format`, and decodes FFmpeg's samples for the same
+packets: SILK-only streams bit-exact against FFmpeg's arm64 build (its
+fused multiply-adds and vectorised reductions are reproduced), CELT and
+hybrid at 134-141 dB, on every FATE Opus vector and the fixtures in
+`tests/ffdec_parity.rs`. The crate's RFC 6716 decoder described below stays
+behind `make_native_decoder`.
+
 **Clean-room rebuild in progress (orphan scaffold).** The prior
 implementation was retired under the workspace clean-room policy; the
 crate is being re-implemented from scratch against the published RFCs
@@ -708,8 +722,12 @@ The rebuild consults only:
   their source) as opaque validators.
 
 No external library source is permitted as a reference under the
-workspace clean-room policy.
+workspace clean-room policy. (This covers the native decoder and the
+encoder; `src/ffdec`, the PearTube fork's registered decoder, is a port of
+FFmpeg's and says so in each file.)
 
 ## License
 
-MIT. See `LICENSE`.
+MIT (`LICENSE`), except `src/ffdec`, ported from FFmpeg:
+LGPL-2.1-or-later (`LICENSE-LGPL`). The crate as a whole is
+`MIT AND LGPL-2.1-or-later`.
