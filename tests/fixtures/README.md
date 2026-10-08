@@ -143,9 +143,10 @@ identical at 48 kHz and 16 kHz.
 `celt-7.1-libopus.opus` is 0.1 s of eight tones (220, 330, 440, 110, 550,
 660, 770, 880 Hz, in FFmpeg's 7.1 order) encoded by FFmpeg's libopus
 wrapper at 256 kb/s with bitexact flags: mapping family 1, 5 streams, 3
-coupled, CELT. `<name>.ffmpeg-2da55bf.f32` is what FFmpeg 2da55bf decodes
-from `<name>.opus` with nothing trimmed (`ffmpeg -flags2 +skip_manual -i
-<name>.opus -f f32le -`): interleaved float in FFmpeg's channel order, the
-whole stream for `celt-7.1-libopus` and `mode-switching`, the first 4,800
-samples per channel of `multistream-5.1` and the first 12,000 of
-`silk-wb-stereo-20kbps`. They drive `tests/ffdec_parity.rs`.
+coupled, CELT. `<name>.ffmpeg-2da55bf.f32` is what FFmpeg 2da55bf's C path
+decodes from `<name>.opus` with nothing trimmed (`ffmpeg -cpuflags 0
+-flags2 +skip_manual -i <name>.opus -f f32le -`): interleaved float in
+FFmpeg's channel order, the whole stream for `celt-7.1-libopus` and
+`mode-switching`, the first 4,800 samples per channel of `multistream-5.1`
+and the first 12,000 of `silk-wb-stereo-20kbps`. They drive
+`tests/ffdec_parity.rs`, which requires every sample bit for bit.

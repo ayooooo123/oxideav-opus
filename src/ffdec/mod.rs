@@ -34,6 +34,7 @@
 mod celt;
 #[allow(clippy::needless_range_loop)]
 mod dec;
+mod fp;
 mod mdct;
 mod parse;
 #[allow(clippy::needless_range_loop)]

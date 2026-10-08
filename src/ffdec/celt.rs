@@ -6,6 +6,7 @@
 // Denes, (c) 2006 Loren Merritt (float_dsp.c);
 // LGPL-2.1-or-later (see LICENSE-LGPL).
 
+use super::fp::ordered_dot;
 use super::mdct::Imdct;
 use super::pvq::{quant_band, Bands, Low, PvqState, CELT_MAX_BANDS, SPREAD_AGGRESSIVE};
 use super::rc::{av_log2, RangeDecoder};
@@ -99,8 +100,10 @@ fn vector_fmul_window(buf: &mut [f32], len: usize) {
         let s1 = buf[2 * len - 1 - k];
         let wi = window(k);
         let wj = window(2 * len - 1 - k);
-        buf[k] = s0 * wj - s1 * wi;
-        buf[2 * len - 1 - k] = s0 * wi + s1 * wj;
+        // dst[i] = s0 * wj - s1 * wi; dst[j] = s0 * wi + s1 * wj, each
+        // fusing its left product (float_dsp.c vector_fmul_window_c).
+        buf[k] = s0.mul_add(wj, -(s1 * wi));
+        buf[2 * len - 1 - k] = s0.mul_add(wi, s1 * wj);
     }
 }
 
@@ -190,8 +193,9 @@ impl Celt {
                 } else {
                     -1.0
                 };
-                block.energy[i] = block.energy[i].max(-9.0) * alpha + prev[j] + value;
-                prev[j] += beta * value;
+                // dec_celt.c:75-76, each fusing its first product.
+                block.energy[i] = block.energy[i].max(-9.0).mul_add(alpha, prev[j]) + value;
+                prev[j] = beta.mul_add(value, prev[j]);
             }
         }
     }
@@ -775,10 +779,8 @@ impl Celt {
             }
             if renormalize {
                 let x = &mut self.block[ch].coeffs[xoff..xoff + n];
-                let mut g = 1e-15f32;
-                for v in x.iter() {
-                    g += v * v;
-                }
+                // celt.h:161 inlined here: an in-order reduction.
+                let g = ordered_dot(1e-15, n, |k| (x[k], x[k]));
                 let g = 1.0 / g.sqrt();
                 for v in x.iter_mut() {
                     *v *= g;
@@ -822,10 +824,15 @@ impl Celt {
             let wf = CELT_WINDOW2[i as usize];
             let w = f64::from(wf);
             let x0 = g(d, i - t1 + 2);
-            // `(1.0 - w) * g * x` is double; `w * g * x` is float.
-            let acc = (1.0 - w) * f64::from(g00) * f64::from(g(d, i - t0))
-                + (1.0 - w) * f64::from(g01) * f64::from(g(d, i - t0 - 1) + g(d, i - t0 + 1))
-                + (1.0 - w) * f64::from(g02) * f64::from(g(d, i - t0 - 2) + g(d, i - t0 + 2))
+            // `(1.0 - w) * g * x` is double; `w * g * x` is float. The
+            // first sum fuses its left product and the third term fuses;
+            // the float terms reach the sum widened, unfused (dec_celt.c:195).
+            let a = 1.0 - w;
+            let t2 = a * f64::from(g01) * f64::from(g(d, i - t0 - 1) + g(d, i - t0 + 1));
+            let acc = (a * f64::from(g00)).mul_add(f64::from(g(d, i - t0)), t2);
+            let acc =
+                (a * f64::from(g02)).mul_add(f64::from(g(d, i - t0 - 2) + g(d, i - t0 + 2)), acc);
+            let acc = acc
                 + f64::from(wf * g10 * x2)
                 + f64::from(wf * g11 * (x1 + x3))
                 + f64::from(wf * g12 * (x0 + x4));
@@ -847,7 +854,9 @@ impl Celt {
         let mut x1 = data[at - period + 1];
         for i in 0..len {
             let x0 = data[at + i - period + 2];
-            data[at + i] += g0 * x2 + g1 * (x1 + x3) + g2 * (x0 + x4);
+            // g0 * x2 + g1 * (x1 + x3) + g2 * (x0 + x4): the first sum fuses
+            // g0 * x2, the second g2 * (x0 + x4) (dsp.c postfilter_c).
+            data[at + i] += g2.mul_add(x0 + x4, g0.mul_add(x2, g1 * (x1 + x3)));
             x4 = x3;
             x3 = x2;
             x2 = x1;
@@ -1038,7 +1047,8 @@ impl Celt {
             let src = 1024 - frame_size;
             let out = &mut output[i];
             for k in 0..frame_size {
-                coeff = block.buf[src + k] + coeff * c;
+                // deemphasis_c: x[i] + coeff * c, fused.
+                coeff = coeff.mul_add(c, block.buf[src + k]);
                 out[k] = coeff;
             }
             block.emph_coeff = if coeff.is_normal() { coeff } else { 0.0 };

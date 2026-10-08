@@ -93,37 +93,33 @@ fn gcd(a: i64, b: i64) -> i64 {
     }
 }
 
-/// One output sample: `Σ src(i) * filter[i]`, accumulated as FFmpeg's arm64
-/// build does it (libswresample/aarch64 `ff_resample_common_float_neon`):
-/// the `filter_length & ~7` (else `& ~3`) leading taps through the NEON
-/// kernel, four lanes of fused multiply-adds (lane `l` takes taps `l`,
-/// `l + 4`, ...) summed pairwise at the end, then the rest one fused
-/// multiply-add at a time.
+/// One output sample: `Σ src(i) * filter[i]` as FFmpeg's C path computes it
+/// (`resample_common` in resample_template.c, the code `-cpuflags 0` runs):
+/// even taps sum into `val`, odd taps into `val2`, and the sample is
+/// `val + val2`. Its arm64 build (resample_dsp.o) vectorizes the pair loop
+/// as two in-order reductions: with `pairs >= 4`, the products of the first
+/// `pairs & !3` pairs are rounded and added one by one, and the rest of the
+/// pairs fuse (`fmadd`); with fewer pairs every one fuses, as does an odd
+/// last tap.
 fn apply_filter(filter: &[f32], src: impl Fn(usize) -> f32) -> f32 {
     let len = filter.len();
-    let x8 = len & !7;
-    let x4 = len & !3;
-    let vector = if x8 >= 8 {
-        x8
-    } else if x4 >= 4 {
-        x4
-    } else {
-        0
-    };
-    let mut val = 0f32;
-    if vector != 0 {
-        let mut acc = [0f32; 4];
-        for block in (0..vector).step_by(4) {
-            for (l, a) in acc.iter_mut().enumerate() {
-                *a = src(block + l).mul_add(filter[block + l], *a);
-            }
+    let pairs = len / 2;
+    let rounded = if pairs >= 4 { pairs & !3 } else { 0 };
+    let (mut val, mut val2) = (0f32, 0f32);
+    for k in 0..pairs {
+        let (i, j) = (2 * k, 2 * k + 1);
+        if k < rounded {
+            val += src(i) * filter[i];
+            val2 += src(j) * filter[j];
+        } else {
+            val = src(i).mul_add(filter[i], val);
+            val2 = src(j).mul_add(filter[j], val2);
         }
-        val = (acc[0] + acc[1]) + (acc[2] + acc[3]);
     }
-    for (i, &f) in filter.iter().enumerate().skip(vector) {
-        val = src(i).mul_add(f, val);
+    if len % 2 == 1 {
+        val = src(len - 1).mul_add(filter[len - 1], val);
     }
-    val
+    val + val2
 }
 
 /// A sample position in the caller's input planes, which `resample` may

@@ -14,12 +14,11 @@ so `register`) returns a port of FFmpeg 2da55bf's Opus decoder
 its SILK path runs through, LGPL-2.1-or-later). It outputs planar float at
 48 kHz in FFmpeg's channel order (mapping family 1 reordered from the
 `OpusHead`'s Vorbis order), reported through
-`Decoder::output_audio_format`, and decodes FFmpeg's samples for the same
-packets: SILK-only streams bit-exact against FFmpeg's arm64 build (its
-fused multiply-adds and vectorised reductions are reproduced), CELT and
-hybrid at 134-141 dB, on every FATE Opus vector and the fixtures in
-`tests/ffdec_parity.rs`. The crate's RFC 6716 decoder described below stays
-behind `make_native_decoder`.
+`Decoder::output_audio_format`, and decodes FFmpeg's samples bit for bit
+for the same packets, against FFmpeg's C path (`ffmpeg -cpuflags 0`), on
+every FATE Opus file and the fixtures in `tests/ffdec_parity.rs`. The
+crate's RFC 6716 decoder described below stays behind
+`make_native_decoder`.
 
 **Clean-room rebuild in progress (orphan scaffold).** The prior
 implementation was retired under the workspace clean-room policy; the

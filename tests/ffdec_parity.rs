@@ -1,12 +1,14 @@
 //! The registered decoder (`make_decoder`, FFmpeg 2da55bf's decoder ported
-//! in `src/ffdec`) against FFmpeg's own output for the same packets.
+//! in `src/ffdec`) against FFmpeg's own output for the same packets: every
+//! sample bit for bit.
 //!
-//! Each `<name>.ffmpeg-2da55bf.f32` holds what FFmpeg 2da55bf decodes from
-//! `<name>.opus` with nothing trimmed (`ffmpeg -flags2 +skip_manual -i
-//! <name>.opus -f f32le -`): interleaved float in FFmpeg's channel order,
-//! cut to its first samples where the stream is long. The decoder gets the
-//! Ogg packets with the `OpusHead` pre-skip cleared (so it trims nothing
-//! either) and is flushed at the end, as FFmpeg drains its decoder.
+//! Each `<name>.ffmpeg-2da55bf.f32` holds what FFmpeg 2da55bf's C path
+//! decodes from `<name>.opus` with nothing trimmed (`ffmpeg -cpuflags 0
+//! -flags2 +skip_manual -i <name>.opus -f f32le -`): interleaved float in
+//! FFmpeg's channel order, cut to its first samples where the stream is
+//! long. The decoder gets the Ogg packets with the `OpusHead` pre-skip
+//! cleared (so it trims nothing either) and is flushed at the end, as FFmpeg
+//! drains its decoder.
 
 use oxideav_core::{
     AudioFormat, CodecId, CodecParameters, Decoder, Error, Frame, Packet, Rational, SampleFormat,
@@ -98,9 +100,9 @@ fn snr_db(want: &[f32], got: &[f32]) -> f64 {
 }
 
 /// Decodes `stream`, checks its layout and its total length (FFmpeg's, in
-/// samples per channel), and returns the SNR of its leading samples against
-/// FFmpeg's (`want` may be a prefix of FFmpeg's output).
-fn check(stream: &[u8], want: &[u8], channels: u16, total: usize) -> f64 {
+/// samples per channel), and asserts that its leading samples are FFmpeg's
+/// bit for bit (`want` may be a prefix of FFmpeg's output).
+fn check(name: &str, stream: &[u8], want: &[u8], channels: u16, total: usize) {
     let (format, got) = decode(stream);
     assert_eq!(
         format,
@@ -113,11 +115,22 @@ fn check(stream: &[u8], want: &[u8], channels: u16, total: usize) -> f64 {
     assert_eq!(
         got.len(),
         total * usize::from(channels),
-        "samples per channel"
+        "{name}: samples per channel"
     );
     let want = reference(want);
     assert!(want.len() <= got.len());
-    snr_db(&want, &got[..want.len()])
+    let differ = want
+        .iter()
+        .zip(&got)
+        .filter(|(w, g)| w.to_bits() != g.to_bits())
+        .count();
+    assert_eq!(
+        differ,
+        0,
+        "{name}: {differ} of {} samples differ from FFmpeg's ({:.1} dB)",
+        want.len(),
+        snr_db(&want, &got[..want.len()])
+    );
 }
 
 /// libopus 7.1 (mapping family 1, 5 streams, 3 coupled), CELT: the eight
@@ -125,49 +138,49 @@ fn check(stream: &[u8], want: &[u8], channels: u16, total: usize) -> f64 {
 /// `OpusHead`'s Vorbis order.
 #[test]
 fn surround_7_1_matches_ffmpeg_in_ffmpeg_channel_order() {
-    let snr = check(
+    check(
+        "7.1",
         include_bytes!("fixtures/celt-7.1-libopus.opus"),
         include_bytes!("fixtures/celt-7.1-libopus.ffmpeg-2da55bf.f32"),
         8,
         5760,
     );
-    assert!(snr >= 120.0, "7.1 vs FFmpeg: {snr:.1} dB");
 }
 
 /// The 5.1 fixture (family 1, 4 streams, 2 coupled), first 0.1 s.
 #[test]
 fn surround_5_1_matches_ffmpeg() {
-    let snr = check(
+    check(
+        "5.1",
         include_bytes!("fixtures/multistream-5.1.opus"),
         include_bytes!("fixtures/multistream-5.1.ffmpeg-2da55bf.f32"),
         6,
         48_960,
     );
-    assert!(snr >= 120.0, "5.1 vs FFmpeg: {snr:.1} dB");
 }
 
 /// Hybrid and CELT frames with mode switches: the SILK resampler's delay,
 /// its flush, the CELT delay buffer and redundancy frames.
 #[test]
 fn mode_switching_matches_ffmpeg() {
-    let snr = check(
+    check(
+        "mode switching",
         include_bytes!("fixtures/mode-switching.opus"),
         include_bytes!("fixtures/mode-switching.ffmpeg-2da55bf.f32"),
         1,
         72_960,
     );
-    assert!(snr >= 120.0, "mode switching vs FFmpeg: {snr:.1} dB");
 }
 
 /// Stereo SILK (WB, mid/side): FFmpeg's float SILK and its swresample
 /// path, which differ from the RFC 6716 reference decoder; first 0.25 s.
 #[test]
 fn stereo_silk_matches_ffmpeg() {
-    let snr = check(
+    check(
+        "stereo SILK",
         include_bytes!("fixtures/silk-wb-stereo-20kbps.opus"),
         include_bytes!("fixtures/silk-wb-stereo-20kbps.ffmpeg-2da55bf.f32"),
         2,
         72_960,
     );
-    assert!(snr >= 120.0, "stereo SILK vs FFmpeg: {snr:.1} dB");
 }

@@ -15,17 +15,22 @@ All notable changes to `oxideav-opus` are recorded here.
   FFmpeg's channel order, reported through `Decoder::output_audio_format`;
   the resampler's delayed SILK samples come out at `flush`. Mapping family
   1 used to come out in the `OpusHead`'s Vorbis order as interleaved S16
-  (7.1: -2.3 dB against FFmpeg, 5.1: 0.6 dB). Every FATE Opus vector now
-  decodes to FFmpeg's sample count, SILK-only streams bit-exact against
-  FFmpeg's arm64 build (its fused multiply-adds, the vectorised in-order LPC
-  reductions and the NEON resampler's accumulation are reproduced), CELT
-  and hybrid at 134-141 dB. Bytes after a frame are read as FFmpeg's bit
-  reader reads them (up to one byte past the frame, from the rest of the
-  packet). The RFC 6716 decoder stays behind the new `make_native_decoder`;
-  the registry tests that pin its reference conformance now build it
-  directly. Tests: `ffdec_parity.rs` (FFmpeg's output for 7.1, 5.1,
-  mode-switching and stereo SILK fixtures), `ffdec_robustness.rs` (2,400
-  mutated packet runs and 2,000 broken `OpusHead`s).
+  (7.1: -2.3 dB against FFmpeg, 5.1: 0.6 dB). Every FATE Opus file now
+  decodes to FFmpeg's samples bit for bit against FFmpeg's C path
+  (`ffmpeg -cpuflags 0`): the CELT inverse MDCT is av_tx's
+  `mdct_pfa_15xM_inv_float_c` over its split-radix `fft{4,8,16,32}_ns`
+  codelets (libavutil/tx.c, tx_template.c), the resampler runs
+  `resample_template.c`'s C filter loop, and every float expression rounds
+  as FFmpeg's arm64 build of that C code does (clang fuses `a*b ± c` within
+  one expression, its left product when both are products, and vectorises
+  in-order sums without fusing their leading blocks of four). Bytes after a
+  frame are read as FFmpeg's bit reader reads them (up to one byte past the
+  frame, from the rest of the packet). The RFC 6716 decoder stays behind the
+  new `make_native_decoder`; the registry tests that pin its reference
+  conformance now build it directly. Tests: `ffdec_parity.rs` (FFmpeg's
+  C-path output for 7.1, 5.1, mode-switching and stereo SILK fixtures, bit
+  for bit), `ffdec_robustness.rs` (2,400 mutated packet runs and 2,000
+  broken `OpusHead`s).
 
 ### Fixed
 

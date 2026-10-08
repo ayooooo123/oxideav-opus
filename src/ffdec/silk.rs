@@ -3,6 +3,7 @@
 // Copyright (c) 2012 Andrew D'Addesio, (c) 2013-2014 Mozilla Corporation;
 // LGPL-2.1-or-later (see LICENSE-LGPL).
 
+use super::fp::ordered_dot;
 use super::parse::{BANDWIDTH_NARROWBAND, BANDWIDTH_WIDEBAND};
 use super::rc::{opus_ilog, RangeDecoder};
 use super::tab::*;
@@ -37,27 +38,6 @@ fn clipf(v: f32, lo: f32, hi: f32) -> f32 {
     } else {
         v
     }
-}
-
-/// `sum + Σ a_k b_k` for `k < n`, `term(k) = (a_k, b_k)`, rounded the way
-/// FFmpeg's arm64 build evaluates silk.c's LPC loops (`sum -= c * x`,
-/// `sum += c * x`): clang vectorizes the in-order reduction in blocks of four
-/// products, each rounded and then added in `k` order, and leaves the last
-/// `n % 4` terms to fused multiply-adds (LPC order 16: all blocked; order
-/// 10: eight blocked, two fused). SILK's synthesis filters can amplify a
-/// last-bit difference, so the rounding order matters.
-#[inline]
-fn ordered_dot(mut sum: f32, n: usize, term: impl Fn(usize) -> (f32, f32)) -> f32 {
-    let blocked = n & !3;
-    for k in 0..blocked {
-        let (a, b) = term(k);
-        sum += a * b;
-    }
-    for k in blocked..n {
-        let (a, b) = term(k);
-        sum = a.mul_add(b, sum);
-    }
-    sum
 }
 
 #[derive(Clone)]

@@ -7,6 +7,7 @@
 
 use std::f64::consts::{FRAC_1_SQRT_2, PI};
 
+use super::fp::ordered_dot;
 use super::rc::{opus_ilog, RangeDecoder};
 use super::tab::*;
 
@@ -177,8 +178,10 @@ fn exp_rotation_impl(x: &mut [f32], len: usize, stride: usize, c: f32, s: f32) {
     for i in 0..len - stride {
         let x1 = x[i];
         let x2 = x[i + stride];
-        x[i + stride] = c * x2 + s * x1;
-        x[i] = c * x1 - s * x2;
+        // c * x2 + s * x1 and c * x1 - s * x2 fuse their left product
+        // (pvq.c:102-103).
+        x[i + stride] = c.mul_add(x2, s * x1);
+        x[i] = c.mul_add(x1, -(s * x2));
     }
     if len < 2 * stride + 1 {
         return;
@@ -188,8 +191,8 @@ fn exp_rotation_impl(x: &mut [f32], len: usize, stride: usize, c: f32, s: f32) {
         let iu = i as usize;
         let x1 = x[iu];
         let x2 = x[iu + stride];
-        x[iu + stride] = c * x2 + s * x1;
-        x[iu] = c * x1 - s * x2;
+        x[iu + stride] = c.mul_add(x2, s * x1);
+        x[iu] = c.mul_add(x1, -(s * x2));
         i -= 1;
     }
 }
@@ -235,16 +238,12 @@ fn extract_collapse_mask(iy: &[i32], n: u32, b: u32) -> u32 {
 }
 
 fn stereo_merge(x: &mut [f32], y: &mut [f32], mid: f32, n: usize) {
-    let mut xp = 0f32;
-    let mut side = 0f32;
-    for i in 0..n {
-        xp += x[i] * y[i];
-        side += y[i] * y[i];
-    }
-    xp *= mid;
+    // pvq.c:179: two in-order reductions (contract "Float rounding").
+    let xp = ordered_dot(0.0, n, |i| (x[i], y[i])) * mid;
+    let side = ordered_dot(0.0, n, |i| (y[i], y[i]));
     let mid2 = mid;
-    let e0 = mid2 * mid2 + side - 2.0 * xp;
-    let e1 = mid2 * mid2 + side + 2.0 * xp;
+    let e0 = mid2.mul_add(mid2, side) - 2.0 * xp;
+    let e1 = mid2.mul_add(mid2, side) + 2.0 * xp;
     if e0 < 6e-4 || e1 < 6e-4 {
         y[..n].copy_from_slice(&x[..n]);
         return;
@@ -421,10 +420,8 @@ fn alg_unquant(
 }
 
 fn renormalize(x: &mut [f32], n: usize, gain: f32) {
-    let mut g = 1e-15f32;
-    for v in &x[..n] {
-        g += v * v;
-    }
+    // celt.h:161: an in-order reduction.
+    let g = ordered_dot(1e-15, n, |k| (x[k], x[k]));
     let g = gain / g.sqrt();
     for v in &mut x[..n] {
         *v *= g;
